@@ -1,0 +1,1 @@
+ /Users/iman/Desktop/sproject/barcode_reader/.dart_tool/flutter_build/65835a2513903c158872173ab4453b35/native_assets.yaml: 
