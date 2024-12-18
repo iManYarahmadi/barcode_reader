@@ -1,125 +1,269 @@
 import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
+import 'package:google_ml_kit/google_ml_kit.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 
-void main() {
-  runApp(const MyApp());
+import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
+import 'package:google_ml_kit/google_ml_kit.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+import 'package:flutter/material.dart';
+import 'package:camera/camera.dart';
+import 'package:flutter/services.dart';
+import 'package:google_ml_kit/google_ml_kit.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final cameras = await availableCameras();
+  runApp(MyApp(cameras: cameras));
 }
 
 class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+  final List<CameraDescription> cameras;
 
-  // This widget is the root of your application.
+  const MyApp({Key? key, required this.cameras}) : super(key: key);
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
-      theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
-        useMaterial3: true,
-      ),
-      home: const MyHomePage(title: 'Flutter Demo Home Page'),
+      debugShowCheckedModeBanner: false,
+      home: BarcodeScannerScreen(cameras: cameras),
     );
   }
 }
 
-class MyHomePage extends StatefulWidget {
-  const MyHomePage({super.key, required this.title});
+class BarcodeScannerScreen extends StatefulWidget {
+  final List<CameraDescription> cameras;
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
-  final String title;
+  const BarcodeScannerScreen({Key? key, required this.cameras}) : super(key: key);
 
   @override
-  State<MyHomePage> createState() => _MyHomePageState();
+  _BarcodeScannerScreenState createState() => _BarcodeScannerScreenState();
 }
 
-class _MyHomePageState extends State<MyHomePage> {
-  int _counter = 0;
+class _BarcodeScannerScreenState extends State<BarcodeScannerScreen> {
+  late CameraController _cameraController;
+  late BarcodeScanner _barcodeScanner;
+  bool isProcessing = false;
+  int frameCount = 0;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
+  @override
+  void initState() {
+    super.initState();
+    _barcodeScanner = GoogleMlKit.vision.barcodeScanner();
+    _requestCameraPermission();
+  }
+
+  Future<void> _requestCameraPermission() async {
+    final status = await Permission.camera.request();
+    if (status.isGranted) {
+      _initializeCamera();
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Camera permission is required')),
+      );
+    }
+  }
+
+  Future<void> _initializeCamera() async {
+    final cameras = await availableCameras();
+    if (cameras.isEmpty) {
+      debugPrint("No cameras available.");
+      return;
+    }
+
+    _cameraController = CameraController(
+      cameras[0],
+      ResolutionPreset.high,  // Set to high resolution for better quality
+      enableAudio: false,
+    );
+
+    try {
+      await _cameraController.initialize();
+      debugPrint("Camera initialized successfully.");
+      setState(() {});
+      _startImageStream();
+    } catch (e) {
+      debugPrint("Error initializing camera: $e");
+    }
+  }
+
+  void _startImageStream() {
+    _cameraController.startImageStream((CameraImage image) async {
+      if (isProcessing) return;
+
+      frameCount++;
+      if (frameCount % 3 != 0) return; // Process every 3rd frame for better performance
+
+      isProcessing = true;
+
+      try {
+        final WriteBuffer allBytes = WriteBuffer();
+        for (Plane plane in image.planes) {
+          allBytes.putUint8List(plane.bytes);
+        }
+        final bytes = allBytes.done().buffer.asUint8List();
+
+        final inputImage = InputImage.fromBytes(
+          bytes: bytes,
+          metadata: InputImageMetadata(
+            size: Size(image.width.toDouble(), image.height.toDouble()),
+            rotation: InputImageRotation.values[widget.cameras[0].sensorOrientation ~/ 90],
+            format: InputImageFormat.nv21,
+            bytesPerRow: image.planes[0].bytesPerRow,
+          ),
+        );
+
+        debugPrint("Processing image...");
+        final barcodes = await _barcodeScanner.processImage(inputImage);
+
+        if (barcodes.isNotEmpty) {
+          debugPrint("Barcode detected: ${barcodes.first.rawValue}");
+          _navigateToBarcodeInfo(barcodes.first);
+        } else {
+          debugPrint("No barcode found.");
+        }
+      } catch (e) {
+        debugPrint("Error processing image: $e");
+      } finally {
+        isProcessing = false;
+      }
+    });
+  }
+
+  void _navigateToBarcodeInfo(Barcode barcode) {
+    _cameraController.stopImageStream(); // Stop stream before navigating
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => BarcodeInfoScreen(barcode: barcode),
+      ),
+    ).then((_) {
+      _startImageStream();
     });
   }
 
   @override
+  void dispose() {
+    _cameraController.dispose();
+    _barcodeScanner.close();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
+    if (!_cameraController.value.isInitialized) {
+      return Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    return Scaffold(
+      body: Stack(
+        children: [
+
+
+          // Barcode overlay or instructions (you can change this part to suit your needs)
+          Align(
+            alignment: Alignment.bottomCenter,
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Text(
+                'Scanning for barcodes...',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 16,
+                  backgroundColor: Colors.black54,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class BarcodeInfoScreen extends StatelessWidget {
+  final Barcode barcode;
+
+  const BarcodeInfoScreen({Key? key, required this.barcode}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    // URL from the barcode raw value
+    final String barcodeUrl = barcode.rawValue ?? 'No URL found';
+
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
-        title: Text(widget.title),
+        title: const Text('Barcode Information'),
       ),
-      body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: <Widget>[
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             const Text(
-              'You have pushed the button this many times:',
+              'Raw Value:',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
             ),
-            Text(
-              '$_counter',
-              style: Theme.of(context).textTheme.headlineMedium,
+            Text(barcode.rawValue ?? 'N/A'),
+            const SizedBox(height: 16),
+            const Text(
+              'Display Value:',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
             ),
+            Text(barcode.displayValue ?? 'N/A'),
+            const SizedBox(height: 16),
+            const Text(
+              'Format:',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            Text(barcode.format.name),
+            const SizedBox(height: 16),
+            const Text(
+              'Type:',
+              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+            ),
+            Text(barcode.type.name),
+            const SizedBox(height: 16),
+
+            // Display barcode URL (if available) and a button to open the link
+            if (barcodeUrl.isNotEmpty && barcodeUrl != 'No URL found')
+              Column(
+                children: [
+                  const SizedBox(height: 16),
+                  Text(
+                    'Barcode Link: $barcodeUrl',
+                    style: TextStyle(fontSize: 16, color: Colors.blue),
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton(
+                    onPressed: () => _launchURL(barcodeUrl),
+                    child: const Text('Open Link'),
+                  ),
+                ],
+              ),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: _incrementCounter,
-        tooltip: 'Increment',
-        child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
     );
+  }
+
+  // Launch the barcode URL using url_launcher
+  void _launchURL(String url) async {
+    if (await canLaunch(url)) {
+      await launch(url);
+    } else {
+      throw 'Could not launch $url';
+    }
   }
 }
